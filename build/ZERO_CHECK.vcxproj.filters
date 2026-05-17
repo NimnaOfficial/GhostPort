@@ -1,0 +1,13 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="17.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <CustomBuild Include="C:\Users\SANDANIMNE\Desktop\MyCodes\Projs\GhostPort\Dev-Shadow\build\CMakeFiles\c54eb72a8952d969d688a47aacd3714a\generate.stamp.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="CMake Rules">
+      <UniqueIdentifier>{E63535EC-5AE4-3EEB-A417-B45FE5677BDB}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>

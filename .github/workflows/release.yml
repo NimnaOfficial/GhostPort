@@ -1,0 +1,40 @@
+name: GhostPort Release Factory
+
+# 1. When does this run? Every time you push to the 'main' branch!
+on:
+  push:
+    branches: [ "main" ]
+
+jobs:
+  build:
+    name: Compile for ${{ matrix.os }}
+    # 2. The OS Matrix: We tell GitHub to spin up 3 different virtual machines
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+
+    steps:
+    # Step A: Download your code onto the cloud machine
+    - name: 📥 Checkout Source Code
+      uses: actions/checkout@v4
+
+    # Step B: Tell CMake to use GitHub's pre-installed vcpkg package manager
+    - name: ⚙️ Configure CMake & vcpkg
+      run: |
+        cmake -B build -S . -DCMAKE_TOOLCHAIN_FILE="$VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" -DCMAKE_BUILD_TYPE=Release
+      shell: bash
+
+    # Step C: Compile the C++ code with maximum optimization
+    - name: 🔨 Compile GhostPort Engine
+      run: cmake --build build --config Release
+
+    # Step D: Grab the finished executable and save it for users to download
+    - name: 📦 Upload Compiled Binaries
+      uses: actions/upload-artifact@v4
+      with:
+        name: GhostPort-${{ matrix.os }}
+        path: |
+          build/Release/shadow.exe
+          build/shadow
+        if-no-files-found: ignore

@@ -1,17 +1,14 @@
 cmake_minimum_required(VERSION 3.20)
-
-# Name your project
 project(DevShadow VERSION 1.0)
-
-# Enforce Modern C++20
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED True)
 
-# Find the library we just downloaded with vcpkg
+# Find our packages
 find_package(ftxui CONFIG REQUIRED)
+find_path(ASIO_INCLUDE_DIR asio.hpp REQUIRED)
 
-# Tell it where our code is
 add_executable(shadow src/main.cpp)
 
-# Link the terminal graphics to our app
+# Tell the compiler where the Asio headers are
+target_include_directories(shadow PRIVATE ${ASIO_INCLUDE_DIR})
 target_link_libraries(shadow PRIVATE ftxui::screen ftxui::dom ftxui::component)

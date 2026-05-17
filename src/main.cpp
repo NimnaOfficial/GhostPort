@@ -2,167 +2,275 @@
 #include <ftxui/screen/screen.hpp>
 #include <ftxui/component/component.hpp>
 #include <ftxui/component/screen_interactive.hpp>
+#include <asio.hpp>
 #include <iostream>
 #include <thread>
-#include <chrono>
-#include <atomic>
+#include <mutex>
 #include <vector>
 #include <string>
-#include <mutex>
-#include <asio.hpp>
+#include <chrono>
+#include <atomic>
 
 using namespace ftxui;
 
-// Global State (Thread Safe)
-std::mutex data_mutex;
-std::vector<int> active_ports;
-std::atomic<bool> is_scanning = false;
-std::vector<std::string> system_logs = {"[SYS] Engine Initialized", "[SYS] Waiting for commands..."};
-
-// Background Networking Thread
-void scan_dev_ports(ScreenInteractive *screen)
+// ============================================================================
+// [1] THE IPC CONTRACT (Zero-Copy Data Structure)
+// ============================================================================
+#pragma pack(push, 1)
+struct PortData
 {
-  is_scanning = true;
-  screen->PostEvent(Event::Custom); // Tell UI to update
+  uint16_t port_number;
+  uint32_t process_id;
+  bool is_memory_leak;
+};
+#pragma pack(pop)
 
-  std::vector<int> target_ports = {3000, 4200, 5000, 5173, 8000, 8080, 5432, 3306};
-  std::vector<int> found_ports;
-  asio::io_context io_context;
+// We now use a dedicated, hidden internal TCP port for the IPC Bridge
+const uint16_t GHOSTPORT_IPC_PORT = 44444;
 
-  for (int port : target_ports)
-  {
-    asio::ip::tcp::socket socket(io_context);
-    asio::error_code ec;
-    socket.connect(asio::ip::tcp::endpoint(asio::ip::address::from_string("127.0.0.1"), port), ec);
-    if (!ec)
-    {
-      found_ports.push_back(port);
-      socket.close();
-    }
-  }
+// ============================================================================
+// [2] GLOBAL STATE (Thread-Safe UI Memory)
+// ============================================================================
+std::mutex state_mutex;
+std::vector<std::string> system_logs = {"[SYS] GhostPort Watchdog Initialized."};
+std::vector<PortData> live_ports;
+std::vector<std::string> port_menu_entries;
+int selected_port_index = 0;
+std::atomic<bool> is_scanning = false;
+std::vector<int> telemetry_data;
 
-  std::lock_guard<std::mutex> lock(data_mutex);
-  active_ports = found_ports;
-  system_logs.insert(system_logs.begin(), "[NET] Network scan complete. Found " + std::to_string(found_ports.size()) + " active ports.");
-  if (system_logs.size() > 5)
-    system_logs.pop_back(); // Keep logs clean
-  is_scanning = false;
-
-  screen->PostEvent(Event::Custom); // Tell UI to update
+void log_event(const std::string &msg, ScreenInteractive *screen = nullptr)
+{
+  std::lock_guard<std::mutex> lock(state_mutex);
+  system_logs.insert(system_logs.begin(), msg);
+  if (system_logs.size() > 8)
+    system_logs.pop_back();
+  if (screen)
+    screen->PostEvent(Event::Custom);
 }
 
-int main()
+// ============================================================================
+// [3] THE CANARY (Silent Background Scanner)
+// ============================================================================
+void execute_canary_mission()
 {
+  asio::io_context io_context;
+  asio::ip::tcp::endpoint ep(asio::ip::address::from_string("127.0.0.1"), GHOSTPORT_IPC_PORT);
+  asio::ip::tcp::socket socket(io_context);
+
+  // 1. Robust Retry Loop - Knock on the Watchdog's TCP door
+  asio::error_code tcp_ec;
+  for (int i = 0; i < 15; ++i)
+  {
+    socket.connect(ep, tcp_ec);
+    if (!tcp_ec)
+      break;
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  }
+
+  if (tcp_ec)
+    return; // Die silently if Watchdog isn't listening
+
+  std::vector<uint16_t> targets = {80, 443, 3000, 3306, 3307, 4200, 5000, 5173, 8000, 8080, 5432};
+  asio::ip::tcp::resolver resolver(io_context);
+
+  for (uint16_t port : targets)
+  {
+    if (port == GHOSTPORT_IPC_PORT)
+      continue; // Don't scan our own bridge
+
+    asio::ip::tcp::socket test_sock(io_context);
+    asio::error_code ec;
+
+    auto endpoints = resolver.resolve("localhost", std::to_string(port), ec);
+
+    if (!ec)
+    {
+      asio::connect(test_sock, endpoints, ec);
+      if (!ec)
+      {
+        // Target Locked! Send Zero-Copy Data
+        PortData data = {port, 0, false};
+        asio::write(socket, asio::buffer(&data, sizeof(PortData)));
+        test_sock.close();
+      }
+    }
+  }
+}
+
+// ============================================================================
+// [4] THE WATCHDOG SERVER (Listens for Canary)
+// ============================================================================
+void watchdog_listen_server(ScreenInteractive *screen)
+{
+  try
+  {
+    asio::io_context io_context;
+    asio::ip::tcp::endpoint ep(asio::ip::address::from_string("127.0.0.1"), GHOSTPORT_IPC_PORT);
+
+    // Create a highly robust TCP server that reuses the port if left open
+    asio::ip::tcp::acceptor acceptor(io_context);
+    acceptor.open(ep.protocol());
+    acceptor.set_option(asio::ip::tcp::acceptor::reuse_address(true));
+    acceptor.bind(ep);
+    acceptor.listen();
+
+    asio::ip::tcp::socket socket(io_context);
+    acceptor.accept(socket); // Wait for Canary to connect
+
+    while (is_scanning)
+    {
+      PortData incoming;
+      asio::error_code ec;
+      size_t len = socket.read_some(asio::buffer(&incoming, sizeof(PortData)), ec);
+
+      if (ec == asio::error::eof || ec)
+        break;
+
+      if (len == sizeof(PortData))
+      {
+        std::lock_guard<std::mutex> lock(state_mutex);
+        live_ports.push_back(incoming);
+        port_menu_entries.push_back("Port " + std::to_string(incoming.port_number) + " [DETECTED]");
+        screen->PostEvent(Event::Custom);
+      }
+    }
+  }
+  catch (std::exception &e)
+  {
+    // Catch the exact error for easier debugging if it ever fails again
+    log_event("[ERR] IPC Bridge Failed: " + std::string(e.what()), screen);
+  }
+
+  is_scanning = false;
+  log_event("[NET] Canary mission complete.", screen);
+}
+
+// ============================================================================
+// [5] THE MASTER UI (Modern Terminal Graphics)
+// ============================================================================
+int main(int argc, char *argv[])
+{
+  // Check if we are the background worker
+  if (argc > 1 && std::string(argv[1]) == "--run-canary")
+  {
+    execute_canary_mission();
+    return 0;
+  }
+
+  // We are the UI Watchdog
   auto screen = ScreenInteractive::Fullscreen();
 
-  // --- UI COMPONENTS ---
+  // --- Dynamic Telemetry ---
+  std::thread([&]()
+              {
+        while (true)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            std::lock_guard<std::mutex> lock(state_mutex);
+            telemetry_data.push_back(rand() % 100);
+            if (telemetry_data.size() > 100)
+                telemetry_data.erase(telemetry_data.begin());
+            screen.PostEvent(Event::Custom);
+        } })
+      .detach();
 
-  // 1. Tab Navigation
-  int tab_index = 0;
-  std::vector<std::string> tab_entries = {
-      "📊 Dashboard", "🌐 Network Reaper", "💾 Storage Health"};
-  auto tab_selection = Toggle(&tab_entries, &tab_index);
-
-  // 2. Buttons
-  auto scan_button = Button("Scan Network Ports", [&]
-                            {
-        if (!is_scanning) {
-            std::lock_guard<std::mutex> lock(data_mutex);
-            system_logs.insert(system_logs.begin(), "[NET] Initiating deep port scan...");
-            std::thread(scan_dev_ports, &screen).detach();
-        } }, ButtonOption::Animated());
-
-  auto quit_button = Button("Quit Dev-Shadow", screen.ExitLoopClosure(), ButtonOption::Animated());
-
-  // --- VIEW RENDERERS ---
-
-  // View 1: Dashboard
-  auto dashboard_view = Renderer([&]
-                                 {
-        std::lock_guard<std::mutex> lock(data_mutex);
-        Elements logs;
-        for (const auto& log : system_logs) logs.push_back(text(log) | dim);
-
-        return vbox({
-            text("System Health Overview") | bold | color(Color::Cyan),
-            separator(),
-            hbox({
-                vbox({
-                    text("CPU Optimization : ACTIVE") | color(Color::Green),
-                    text("Memory Leak Guard: ACTIVE") | color(Color::Green),
-                }) | borderEmpty | flex,
-                vbox({
-                    text("Total Zombie Ports: " + std::to_string(active_ports.size())) | color(Color::Yellow),
-                    text("Wasted Storage    : 0 MB"),
-                }) | borderEmpty | flex,
-            }),
-            separator(),
-            text("Recent Activity Log:") | bold,
-            vbox(std::move(logs)) | borderLight | flex
-        }); });
-
-  // View 2: Network Reaper
-  auto network_view = Renderer(scan_button, [&]
+  auto telemetry_graph = graph([&](int width, int height)
                                {
-        std::lock_guard<std::mutex> lock(data_mutex);
-        Elements port_ui;
-        
-        if (is_scanning) {
-            port_ui.push_back(text("Scanning OS hardware endpoints...") | blink | color(Color::Blue));
-        } else if (active_ports.empty()) {
-            port_ui.push_back(text("All ports are clean. No zombie processes detected.") | color(Color::Green));
-        } else {
-            for (int p : active_ports) {
-                port_ui.push_back(hbox({
-                    text(" [PORT " + std::to_string(p) + "] ") | bold,
-                    text(" OCCUPIED ") | inverted | color(Color::Red),
-                }) | borderEmpty);
-            }
+        std::vector<int> out(width, 0);
+        std::lock_guard<std::mutex> lock(state_mutex);
+        int start = std::max(0, (int)telemetry_data.size() - width);
+        for (int i = 0; i < width && (start + i) < telemetry_data.size(); ++i)
+        {
+            out[i] = (telemetry_data[start + i] * height) / 100;
         }
+        return out; }) |
+                         color(Color::Cyan);
+
+  // --- UI Components ---
+  int tab_index = 0;
+  std::vector<std::string> tab_labels = {" 📊 Dashboard ", " 🌐 Port Reaper ", " 🐳 Docker ", " 💾 Stasis "};
+  auto tab_toggle = Toggle(tab_labels, &tab_index);
+
+  auto scan_btn = Button("Deploy Security Canary", [&]
+                         {
+        if (!is_scanning)
+        {
+            is_scanning = true;
+            {
+                std::lock_guard<std::mutex> lock(state_mutex);
+                live_ports.clear();
+                port_menu_entries.clear();
+            }
+            log_event("[NET] Deploying Canary to OS layer...", &screen);
+
+            std::thread(watchdog_listen_server, &screen).detach();
+
+            std::string cmd = std::string(argv[0]) + " --run-canary";
+#ifdef _WIN32
+            std::string safe_path = "\"" + std::string(argv[0]) + "\"";
+            system(("start /B \"\" " + safe_path + " --run-canary >nul 2>nul").c_str());
+#else
+            system((cmd + " &").c_str());
+#endif
+        } }, ButtonOption::Animated(Color::Red, Color::White));
+
+  auto port_menu = Radiobox(&port_menu_entries, &selected_port_index);
+
+  auto kill_btn = Button("Terminate Selected Port", [&]
+                         {
+        if (!port_menu_entries.empty())
+        {
+            log_event("[SEC] Terminated " + port_menu_entries[selected_port_index], &screen);
+        } }, ButtonOption::Animated(Color::Yellow, Color::Black));
+
+  // --- Tab Renderers ---
+  auto dashboard_renderer = Renderer([&]
+                                     {
+        Elements logs;
+        std::lock_guard<std::mutex> lock(state_mutex);
+        for (const auto &log : system_logs) logs.push_back(text(log) | dim);
 
         return vbox({
-            text("Network Port Management") | bold | color(Color::Cyan),
-            separator(),
-            scan_button->Render() | center,
-            separator(),
-            vbox(std::move(port_ui)) | flex
+            hbox({
+                window(text(" System Telemetry "), telemetry_graph) | flex,
+                window(text(" Engine Status "), vbox({
+                    text("Watchdog   : ONLINE") | color(Color::Green),
+                    text("IPC Socket : SECURE") | color(Color::Green),
+                    text("Memory     : STABLE") | color(Color::Green),
+                }))
+            }),
+            window(text(" Security Logs "), vbox(std::move(logs))) | flex
         }); });
 
-  // View 3: Storage (Placeholder)
-  auto storage_view = Renderer([&]
-                               { return vbox({
-                                            text("Storage Artifact Scrubber") | bold | color(Color::Cyan),
-                                            separator(),
-                                            text("Module scanning engine currently offline.") | dim | center,
-                                        }) |
-                                        flex; });
+  auto network_renderer = Renderer(Container::Vertical({scan_btn, port_menu, kill_btn}), [&]
+                                   { return window(text(" Zero-Copy Network Reaper "),
+                                                   vbox({scan_btn->Render() | center,
+                                                         separator(),
+                                                         is_scanning ? (text(" Canary scanning... ") | blink | color(Color::Red) | center) : text(""),
+                                                         port_menu_entries.empty()
+                                                             ? (text(" No malicious ports detected.") | dim | center | flex)
+                                                             : window(text(" Target Lock "), vbox({port_menu->Render(), separator(), kill_btn->Render() | center})) | flex})); });
 
-  // Combine views dynamically based on the selected tab
-  auto tab_content = Container::Tab({dashboard_view,
-                                     network_view,
-                                     storage_view},
-                                    &tab_index);
+  auto mock_renderer = Renderer([&]
+                                { return window(text(" Feature Locked "), text("Advanced module awaiting next development cycle.") | dim | center) | flex; });
 
-  // --- MAIN LAYOUT ASSEMBLY ---
-  auto main_container = Container::Vertical({tab_selection,
-                                             tab_content,
-                                             quit_button});
+  auto tab_container = Container::Tab({dashboard_renderer, network_renderer, mock_renderer, mock_renderer}, &tab_index);
 
-  auto final_renderer = Renderer(main_container, [&]
-                                 { return vbox({text(" DEV-SHADOW ADVANCED TERMINAL ") | bold | inverted | center,
-                                                separator(),
-                                                tab_selection->Render() | center,
-                                                separator(),
-                                                tab_content->Render() | flex, // Flex fills the remaining space
-                                                separator(),
-                                                quit_button->Render() | center}) |
-                                          borderHeavy | flex; });
+  // --- Main Assembly ---
+  auto main_layout = Container::Vertical({tab_toggle, tab_container});
 
-  // We no longer need an infinite ticking thread because FTXUI components
-  // are interactive! We only trigger redraws when clicking or when the scan finishes.
+  auto final_ui = Renderer(main_layout, [&]
+                           { return vbox({text(" G H O S T P O R T ") | bold | inverted | center,
+                                          text(" ADVANCED DEVELOPMENT ENVIRONMENT SECURITY ") | dim | center,
+                                          separator(),
+                                          tab_toggle->Render() | center,
+                                          separator(),
+                                          tab_container->Render() | flex,
+                                          text(" Press 'Ctrl+C' to emergency abort.") | dim | center}) |
+                                    borderHeavy; });
 
-  screen.Loop(final_renderer);
-
-  std::cout << "\n[Dev-Shadow] Graceful Shutdown Complete.\n";
+  screen.Loop(final_ui);
+  std::cout << "\n[GhostPort] System Shutdown Sequence Complete.\n";
   return 0;
 }

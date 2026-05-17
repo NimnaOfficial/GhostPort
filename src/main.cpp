@@ -13,6 +13,9 @@
 
 using namespace ftxui;
 
+// ============================================================================
+// [1] DATA STRUCTURES & IPC CONTRACT
+// ============================================================================
 #pragma pack(push, 1)
 struct PortData
 {
@@ -22,15 +25,32 @@ struct PortData
 };
 #pragma pack(pop)
 
+struct DockerContainer
+{
+  std::string id;
+  std::string name;
+  std::string status;
+};
+
 const uint16_t GHOSTPORT_IPC_PORT = 44444;
 
+// ============================================================================
+// [2] GLOBAL STATE
+// ============================================================================
 std::mutex state_mutex;
 std::vector<std::string> system_logs = {"[SYS] GhostPort Watchdog Initialized."};
+std::vector<int> telemetry_data;
+
+// Port Reaper State
 std::vector<PortData> live_ports;
 std::vector<std::string> port_menu_entries;
 int selected_port_index = 0;
 std::atomic<bool> is_scanning = false;
-std::vector<int> telemetry_data;
+
+// Docker Poltergeist State
+std::vector<DockerContainer> docker_list;
+std::vector<std::string> docker_menu_entries;
+int selected_docker_index = 0;
 
 void log_event(const std::string &msg, ScreenInteractive *screen = nullptr)
 {
@@ -42,6 +62,57 @@ void log_event(const std::string &msg, ScreenInteractive *screen = nullptr)
     screen->PostEvent(Event::Custom);
 }
 
+// ============================================================================
+// [3] DOCKER PIPELINE (The Poltergeist)
+// ============================================================================
+void scan_docker_environment()
+{
+  docker_list.clear();
+  docker_menu_entries.clear();
+  selected_docker_index = 0;
+
+  // Use OS Pipes to hijack the Docker CLI output
+#ifdef _WIN32
+  FILE *pipe = _popen("docker ps --format \"{{.ID}}|{{.Names}}|{{.Status}}\"", "r");
+#else
+  FILE *pipe = popen("docker ps --format \"{{.ID}}|{{.Names}}|{{.Status}}\"", "r");
+#endif
+
+  if (!pipe)
+    return;
+
+  char buffer[256];
+  while (fgets(buffer, sizeof(buffer), pipe) != nullptr)
+  {
+    std::string line(buffer);
+    if (!line.empty() && line.back() == '\n')
+      line.pop_back();
+
+    // Parse the hijacked text into our C++ Struct
+    size_t pos1 = line.find('|');
+    size_t pos2 = line.find('|', pos1 + 1);
+    if (pos1 != std::string::npos && pos2 != std::string::npos)
+    {
+      DockerContainer c;
+      c.id = line.substr(0, pos1);
+      c.name = line.substr(pos1 + 1, pos2 - pos1 - 1);
+      c.status = line.substr(pos2 + 1);
+
+      docker_list.push_back(c);
+      docker_menu_entries.push_back("🐳 " + c.name + "   [" + c.status + "]");
+    }
+  }
+
+#ifdef _WIN32
+  _pclose(pipe);
+#else
+  pclose(pipe);
+#endif
+}
+
+// ============================================================================
+// [4] THE CANARY (Network Scanner)
+// ============================================================================
 void execute_canary_mission()
 {
   asio::io_context io_context;
@@ -56,7 +127,6 @@ void execute_canary_mission()
       break;
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
   }
-
   if (tcp_ec)
     return;
 
@@ -70,7 +140,6 @@ void execute_canary_mission()
 
     asio::ip::tcp::socket test_sock(io_context);
     asio::error_code ec;
-
     auto endpoints = resolver.resolve("localhost", std::to_string(port), ec);
 
     if (!ec)
@@ -86,6 +155,9 @@ void execute_canary_mission()
   }
 }
 
+// ============================================================================
+// [5] THE WATCHDOG (TCP Server)
+// ============================================================================
 void watchdog_listen_server(ScreenInteractive *screen)
 {
   try
@@ -129,6 +201,9 @@ void watchdog_listen_server(ScreenInteractive *screen)
   log_event("[NET] Canary mission complete.", screen);
 }
 
+// ============================================================================
+// [6] THE MASTER UI
+// ============================================================================
 int main(int argc, char *argv[])
 {
   if (argc > 1 && std::string(argv[1]) == "--run-canary")
@@ -139,6 +214,7 @@ int main(int argc, char *argv[])
 
   auto screen = ScreenInteractive::Fullscreen();
 
+  // Telemetry Thread
   std::thread([&]()
               {
         while (true) {
@@ -165,6 +241,7 @@ int main(int argc, char *argv[])
   std::vector<std::string> tab_labels = {" Dashboard ", " Port Reaper ", " Docker ", " Stasis "};
   auto tab_toggle = Toggle(tab_labels, &tab_index);
 
+  // --- PORT REAPER COMPONENTS ---
   auto scan_btn = Button("Deploy Security Canary", [&]
                          {
         if (!is_scanning) {
@@ -175,7 +252,6 @@ int main(int argc, char *argv[])
                 port_menu_entries.clear();
             }
             log_event("[NET] Deploying Canary to OS layer...", &screen);
-
             std::thread(watchdog_listen_server, &screen).detach();
 
             std::string cmd = std::string(argv[0]) + " --run-canary";
@@ -188,36 +264,55 @@ int main(int argc, char *argv[])
         } }, ButtonOption::Animated(Color::Red, Color::White));
 
   auto port_menu = Radiobox(&port_menu_entries, &selected_port_index);
-
   auto kill_btn = Button("Terminate Selected Port", [&]
                          {
         if (!port_menu_entries.empty() && selected_port_index >= 0 && selected_port_index < live_ports.size()) {
             uint16_t target_port = live_ports[selected_port_index].port_number;
             log_event("[SEC] Engaging lethal injection on Port " + std::to_string(target_port) + "...", &screen);
 
-      // Execute OS-level kill command silently in the background
 #ifdef _WIN32
-            // Upgraded to native taskkill: Loops through all PIDs listening on the port and force-kills them
             std::string cmd = "FOR /F \"tokens=5\" %P IN ('netstat -aon ^| find \":" + std::to_string(target_port) + "\" ^| find \"LISTENING\"') DO taskkill /F /PID %P >nul 2>nul";
             system(cmd.c_str());
 #else
-            // Linux/Mac: Use lsof and kill
             std::string cmd = "kill -9 $(lsof -t -i:" + std::to_string(target_port) + " -sTCP:LISTEN)";
             system(cmd.c_str());
 #endif
-            
             log_event("[SEC] Target neutralized.", &screen);
-            
-            // Instantly remove the dead port from the GhostPort UI
             live_ports.erase(live_ports.begin() + selected_port_index);
             port_menu_entries.erase(port_menu_entries.begin() + selected_port_index);
-            
-            // Adjust the menu selection so it doesn't crash
             if (selected_port_index > 0) selected_port_index--;
-            
-            // Redraw the screen
-            screen.PostEvent(Event::Custom);
         } }, ButtonOption::Animated(Color::Yellow, Color::Black));
+
+  // --- DOCKER POLTERGEIST COMPONENTS ---
+  auto refresh_docker_btn = Button("Scan Docker Subsystem", [&]
+                                   {
+        log_event("[DOCKER] Scanning for container anomalies...", &screen);
+        scan_docker_environment();
+        if (docker_list.empty()) log_event("[DOCKER] No active containers found.", &screen);
+        else log_event("[DOCKER] Target lock on " + std::to_string(docker_list.size()) + " containers.", &screen); }, ButtonOption::Animated(Color::Blue, Color::White));
+
+  auto docker_menu = Radiobox(&docker_menu_entries, &selected_docker_index);
+
+  auto stop_docker_btn = Button("Graceful Spin Down (SIGTERM)", [&]
+                                {
+        if (!docker_list.empty() && selected_docker_index >= 0 && selected_docker_index < docker_list.size()) {
+            std::string target_id = docker_list[selected_docker_index].id;
+            std::string target_name = docker_list[selected_docker_index].name;
+            log_event("[DOCKER] Spinning down: " + target_name + "...", &screen);
+            
+            // Execute in background so UI doesn't freeze while Docker stops
+            std::thread([target_id, target_name, &screen]() {
+                std::string cmd = "docker stop " + target_id + " >nul 2>nul";
+                system(cmd.c_str());
+                log_event("[DOCKER] " + target_name + " successfully halted.", &screen);
+            }).detach();
+
+            docker_list.erase(docker_list.begin() + selected_docker_index);
+            docker_menu_entries.erase(docker_menu_entries.begin() + selected_docker_index);
+            if (selected_docker_index > 0) selected_docker_index--;
+        } }, ButtonOption::Animated(Color::Yellow, Color::Black));
+
+  // --- RENDERERS ---
   auto dashboard_renderer = Renderer([&]
                                      {
         Elements logs;
@@ -230,7 +325,7 @@ int main(int argc, char *argv[])
                 window(text(" Engine Status "), vbox({
                     text("Watchdog   : ONLINE") | color(Color::Green),
                     text("IPC Socket : SECURE") | color(Color::Green),
-                    text("Memory     : STABLE") | color(Color::Green),
+                    text("Docker API : READY") | color(Color::Green),
                 }))
             }),
             window(text(" Security Logs "), vbox(std::move(logs))) | flex
@@ -238,18 +333,21 @@ int main(int argc, char *argv[])
 
   auto network_renderer = Renderer(Container::Vertical({scan_btn, port_menu, kill_btn}), [&]
                                    { return window(text(" Zero-Copy Network Reaper "),
-                                                   vbox({scan_btn->Render() | center,
-                                                         separator(),
+                                                   vbox({scan_btn->Render() | center, separator(),
                                                          is_scanning ? (text(" Canary scanning... ") | blink | color(Color::Red) | center) : text(""),
-                                                         port_menu_entries.empty()
-                                                             ? (text(" No malicious ports detected.") | dim | center | flex)
-                                                             : window(text(" Target Lock "), vbox({port_menu->Render(), separator(), kill_btn->Render() | center})) | flex})); });
+                                                         port_menu_entries.empty() ? (text(" No malicious ports detected.") | dim | center | flex)
+                                                                                   : window(text(" Target Lock "), vbox({port_menu->Render(), separator(), kill_btn->Render() | center})) | flex})); });
+
+  auto docker_renderer = Renderer(Container::Vertical({refresh_docker_btn, docker_menu, stop_docker_btn}), [&]
+                                  { return window(text(" Docker Poltergeist "),
+                                                  vbox({refresh_docker_btn->Render() | center, separator(),
+                                                        docker_menu_entries.empty() ? (text(" Docker Engine idle or unreachable.") | dim | center | flex)
+                                                                                    : window(text(" Container Lock "), vbox({docker_menu->Render(), separator(), stop_docker_btn->Render() | center})) | flex})); });
 
   auto mock_renderer = Renderer([&]
                                 { return window(text(" Feature Locked "), text("Advanced module awaiting next development cycle.") | dim | center) | flex; });
 
-  auto tab_container = Container::Tab({dashboard_renderer, network_renderer, mock_renderer, mock_renderer}, &tab_index);
-
+  auto tab_container = Container::Tab({dashboard_renderer, network_renderer, docker_renderer, mock_renderer}, &tab_index);
   auto main_layout = Container::Vertical({tab_toggle, tab_container});
 
   auto final_ui = Renderer(main_layout, [&]

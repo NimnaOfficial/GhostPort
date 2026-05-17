@@ -13,9 +13,6 @@
 
 using namespace ftxui;
 
-// ============================================================================
-// [1] THE IPC CONTRACT (Zero-Copy Data Structure)
-// ============================================================================
 #pragma pack(push, 1)
 struct PortData
 {
@@ -25,12 +22,8 @@ struct PortData
 };
 #pragma pack(pop)
 
-// We now use a dedicated, hidden internal TCP port for the IPC Bridge
 const uint16_t GHOSTPORT_IPC_PORT = 44444;
 
-// ============================================================================
-// [2] GLOBAL STATE (Thread-Safe UI Memory)
-// ============================================================================
 std::mutex state_mutex;
 std::vector<std::string> system_logs = {"[SYS] GhostPort Watchdog Initialized."};
 std::vector<PortData> live_ports;
@@ -49,16 +42,12 @@ void log_event(const std::string &msg, ScreenInteractive *screen = nullptr)
     screen->PostEvent(Event::Custom);
 }
 
-// ============================================================================
-// [3] THE CANARY (Silent Background Scanner)
-// ============================================================================
 void execute_canary_mission()
 {
   asio::io_context io_context;
   asio::ip::tcp::endpoint ep(asio::ip::address::from_string("127.0.0.1"), GHOSTPORT_IPC_PORT);
   asio::ip::tcp::socket socket(io_context);
 
-  // 1. Robust Retry Loop - Knock on the Watchdog's TCP door
   asio::error_code tcp_ec;
   for (int i = 0; i < 15; ++i)
   {
@@ -69,7 +58,7 @@ void execute_canary_mission()
   }
 
   if (tcp_ec)
-    return; // Die silently if Watchdog isn't listening
+    return;
 
   std::vector<uint16_t> targets = {80, 443, 3000, 3306, 3307, 4200, 5000, 5173, 8000, 8080, 5432};
   asio::ip::tcp::resolver resolver(io_context);
@@ -77,7 +66,7 @@ void execute_canary_mission()
   for (uint16_t port : targets)
   {
     if (port == GHOSTPORT_IPC_PORT)
-      continue; // Don't scan our own bridge
+      continue;
 
     asio::ip::tcp::socket test_sock(io_context);
     asio::error_code ec;
@@ -89,7 +78,6 @@ void execute_canary_mission()
       asio::connect(test_sock, endpoints, ec);
       if (!ec)
       {
-        // Target Locked! Send Zero-Copy Data
         PortData data = {port, 0, false};
         asio::write(socket, asio::buffer(&data, sizeof(PortData)));
         test_sock.close();
@@ -98,9 +86,6 @@ void execute_canary_mission()
   }
 }
 
-// ============================================================================
-// [4] THE WATCHDOG SERVER (Listens for Canary)
-// ============================================================================
 void watchdog_listen_server(ScreenInteractive *screen)
 {
   try
@@ -108,7 +93,6 @@ void watchdog_listen_server(ScreenInteractive *screen)
     asio::io_context io_context;
     asio::ip::tcp::endpoint ep(asio::ip::address::from_string("127.0.0.1"), GHOSTPORT_IPC_PORT);
 
-    // Create a highly robust TCP server that reuses the port if left open
     asio::ip::tcp::acceptor acceptor(io_context);
     acceptor.open(ep.protocol());
     acceptor.set_option(asio::ip::tcp::acceptor::reuse_address(true));
@@ -116,7 +100,7 @@ void watchdog_listen_server(ScreenInteractive *screen)
     acceptor.listen();
 
     asio::ip::tcp::socket socket(io_context);
-    acceptor.accept(socket); // Wait for Canary to connect
+    acceptor.accept(socket);
 
     while (is_scanning)
     {
@@ -138,7 +122,6 @@ void watchdog_listen_server(ScreenInteractive *screen)
   }
   catch (std::exception &e)
   {
-    // Catch the exact error for easier debugging if it ever fails again
     log_event("[ERR] IPC Bridge Failed: " + std::string(e.what()), screen);
   }
 
@@ -146,31 +129,23 @@ void watchdog_listen_server(ScreenInteractive *screen)
   log_event("[NET] Canary mission complete.", screen);
 }
 
-// ============================================================================
-// [5] THE MASTER UI (Modern Terminal Graphics)
-// ============================================================================
 int main(int argc, char *argv[])
 {
-  // Check if we are the background worker
   if (argc > 1 && std::string(argv[1]) == "--run-canary")
   {
     execute_canary_mission();
     return 0;
   }
 
-  // We are the UI Watchdog
   auto screen = ScreenInteractive::Fullscreen();
 
-  // --- Dynamic Telemetry ---
   std::thread([&]()
               {
-        while (true)
-        {
+        while (true) {
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
             std::lock_guard<std::mutex> lock(state_mutex);
             telemetry_data.push_back(rand() % 100);
-            if (telemetry_data.size() > 100)
-                telemetry_data.erase(telemetry_data.begin());
+            if (telemetry_data.size() > 100) telemetry_data.erase(telemetry_data.begin());
             screen.PostEvent(Event::Custom);
         } })
       .detach();
@@ -180,22 +155,19 @@ int main(int argc, char *argv[])
         std::vector<int> out(width, 0);
         std::lock_guard<std::mutex> lock(state_mutex);
         int start = std::max(0, (int)telemetry_data.size() - width);
-        for (int i = 0; i < width && (start + i) < telemetry_data.size(); ++i)
-        {
+        for (int i = 0; i < width && (start + i) < telemetry_data.size(); ++i) {
             out[i] = (telemetry_data[start + i] * height) / 100;
         }
         return out; }) |
                          color(Color::Cyan);
 
-  // --- UI Components ---
   int tab_index = 0;
-  std::vector<std::string> tab_labels = {" 📊 Dashboard ", " 🌐 Port Reaper ", " 🐳 Docker ", " 💾 Stasis "};
+  std::vector<std::string> tab_labels = {" Dashboard ", " Port Reaper ", " Docker ", " Stasis "};
   auto tab_toggle = Toggle(tab_labels, &tab_index);
 
   auto scan_btn = Button("Deploy Security Canary", [&]
                          {
-        if (!is_scanning)
-        {
+        if (!is_scanning) {
             is_scanning = true;
             {
                 std::lock_guard<std::mutex> lock(state_mutex);
@@ -219,12 +191,33 @@ int main(int argc, char *argv[])
 
   auto kill_btn = Button("Terminate Selected Port", [&]
                          {
-        if (!port_menu_entries.empty())
-        {
-            log_event("[SEC] Terminated " + port_menu_entries[selected_port_index], &screen);
-        } }, ButtonOption::Animated(Color::Yellow, Color::Black));
+        if (!port_menu_entries.empty() && selected_port_index >= 0 && selected_port_index < live_ports.size()) {
+            uint16_t target_port = live_ports[selected_port_index].port_number;
+            log_event("[SEC] Engaging lethal injection on Port " + std::to_string(target_port) + "...", &screen);
 
-  // --- Tab Renderers ---
+      // Execute OS-level kill command silently in the background
+#ifdef _WIN32
+            // Upgraded to native taskkill: Loops through all PIDs listening on the port and force-kills them
+            std::string cmd = "FOR /F \"tokens=5\" %P IN ('netstat -aon ^| find \":" + std::to_string(target_port) + "\" ^| find \"LISTENING\"') DO taskkill /F /PID %P >nul 2>nul";
+            system(cmd.c_str());
+#else
+            // Linux/Mac: Use lsof and kill
+            std::string cmd = "kill -9 $(lsof -t -i:" + std::to_string(target_port) + " -sTCP:LISTEN)";
+            system(cmd.c_str());
+#endif
+            
+            log_event("[SEC] Target neutralized.", &screen);
+            
+            // Instantly remove the dead port from the GhostPort UI
+            live_ports.erase(live_ports.begin() + selected_port_index);
+            port_menu_entries.erase(port_menu_entries.begin() + selected_port_index);
+            
+            // Adjust the menu selection so it doesn't crash
+            if (selected_port_index > 0) selected_port_index--;
+            
+            // Redraw the screen
+            screen.PostEvent(Event::Custom);
+        } }, ButtonOption::Animated(Color::Yellow, Color::Black));
   auto dashboard_renderer = Renderer([&]
                                      {
         Elements logs;
@@ -257,7 +250,6 @@ int main(int argc, char *argv[])
 
   auto tab_container = Container::Tab({dashboard_renderer, network_renderer, mock_renderer, mock_renderer}, &tab_index);
 
-  // --- Main Assembly ---
   auto main_layout = Container::Vertical({tab_toggle, tab_container});
 
   auto final_ui = Renderer(main_layout, [&]

@@ -101,7 +101,7 @@ GhostPort is designed to be injected directly into your Operating System. Instea
 Open your terminal and pull the source code to your local machine:
 
 ```bash
-git clone [https://github.com/NimnaOfficial/GhostPort.git](https://github.com/NimnaOfficial/GhostPort.git)
+git clone https://github.com/NimnaOfficial/GhostPort.git
 cd GhostPort
 ```
 

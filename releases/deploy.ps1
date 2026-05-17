@@ -1,14 +1,14 @@
 Write-Host "[*] Initiating GhostPort OS Deployment Protocol..." -ForegroundColor Cyan
 
-# 1. Define Paths (Updated for Release Package)
-$SourceExe = "$PSScriptRoot\shadow.exe"
+# 1. Define Paths
+$SourceExe = ".\build\Release\shadow.exe"
 $InstallDir = "$env:LOCALAPPDATA\GhostPort"
 $TargetExe = "$InstallDir\ghostport.exe"
 
-# 2. Check if the binary exists
+# 2. Check if the Release build exists
 if (-Not (Test-Path $SourceExe)) {
-    Write-Host "[!] ERROR: Could not find the executable at $SourceExe." -ForegroundColor Red
-    Write-Host "[!] Please ensure shadow.exe is in the same folder as this script." -ForegroundColor Yellow
+    Write-Host "[!] ERROR: Could not find the Release build at $SourceExe." -ForegroundColor Red
+    Write-Host "[!] Please ensure you selected 'Release' in CMake and built the project." -ForegroundColor Yellow
     Exit
 }
 
@@ -29,8 +29,7 @@ if ($UserPath -notmatch [regex]::Escape($InstallDir)) {
     $NewPath = $UserPath + ";$InstallDir"
     [Environment]::SetEnvironmentVariable("PATH", $NewPath, "User")
     Write-Host "[+] GhostPort successfully added to System PATH!" -ForegroundColor Green
-}
-else {
+} else {
     Write-Host "[+] GhostPort is already registered in the System PATH." -ForegroundColor Green
 }
 

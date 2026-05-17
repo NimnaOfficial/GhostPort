@@ -543,7 +543,7 @@ int main(int argc, char *argv[])
                 stasis_subsystem_toggle->Render() | center, separator(),
                 refresh_stasis_btn->Render() | center, separator(),
                 is_empty ? (text(stasis_mode == 0 ? " No Docker targets found." : " No OS targets found.") | dim | center | flex)
-                    : window(text(" Target Lock "), vbox({ active_menu, separator(), hbox({freeze_btn->Render() | center, text("   "), thaw_btn->Render() | center}) | center })) | flex
+                    : window(text(" Target Lock "), vbox({ active_menu, separator(), hbox({ freeze_btn->Render(), text("   "), thaw_btn->Render() }) | center })) | flex
             })
         ); });
 

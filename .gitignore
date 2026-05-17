@@ -1,0 +1,11 @@
+# CMake build directories
+/build/
+/out/
+
+# VS Code settings
+.vscode/
+
+# Compiled binaries
+*.exe
+*.out
+*.app

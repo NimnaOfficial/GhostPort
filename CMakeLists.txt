@@ -11,4 +11,9 @@ add_executable(shadow src/main.cpp)
 
 # Tell the compiler where the Asio headers are
 target_include_directories(shadow PRIVATE ${ASIO_INCLUDE_DIR})
-target_link_libraries(shadow PRIVATE ftxui::screen ftxui::dom ftxui::component)
+# Add this at the bottom of CMakeLists.txt
+if(WIN32)
+    target_link_libraries(shadow PRIVATE ftxui::screen ftxui::dom ftxui::component pdh ws2_32)
+else()
+    target_link_libraries(shadow PRIVATE ftxui::screen ftxui::dom ftxui::component)
+endif()

@@ -706,15 +706,16 @@ int main(int argc, char *argv[])
 
   auto uninstall_btn = Button("Uninstall", [&]
                               {
+    // FIX: Using PowerShell string concatenation instead of single-quote literals
     std::string ps_cmd = "powershell -WindowStyle Normal -Command \""
         "Start-Sleep -Seconds 2; "
-        "$InstallDir = '$env:LOCALAPPDATA\\GhostPort'; "
+        "$InstallDir = $env:LOCALAPPDATA + '\\GhostPort'; "
         "$UserPath = [Environment]::GetEnvironmentVariable('PATH', 'User'); "
         "$PathArray = $UserPath -split ';'; "
         "$NewPathArray = $PathArray | Where-Object { $_ -ne $InstallDir -and $_ -ne '' }; "
         "$NewPath = $NewPathArray -join ';'; "
         "[Environment]::SetEnvironmentVariable('PATH', $NewPath, 'User'); "
-        "Remove-Item -Path $InstallDir -Recurse -Force; "
+        "if (Test-Path $InstallDir) { Remove-Item -Path $InstallDir -Recurse -Force; } "
         "Write-Host 'GhostPort has been successfully uninstalled. You can close this terminal.'; "
         "Start-Sleep -Seconds 5;"
         "\"";

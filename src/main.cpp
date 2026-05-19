@@ -12,6 +12,7 @@
 //   [B9] UI WASTE   — empty text("") gap in network_renderer
 //   [B10] NO KILL   — port-kill command was Windows-only; Linux branch added
 //   [B11] CONTENTION— dashboard renderer held mutex for entire render pass
+//   [F1] UNINSTALL  — Integrated self-destruct deployment protocol
 // ============================================================================
 
 #include <ftxui/dom/elements.hpp>
@@ -26,7 +27,7 @@
 #include <string>
 #include <chrono>
 #include <atomic>
-#include <cstdlib> // [B7] rand, srand
+#include <cstdlib> // [B7] rand, srand, exit
 #include <ctime>   // [B7] std::time
 #include <cstdio>  // snprintf, popen
 
@@ -692,7 +693,36 @@ int main(int argc, char *argv[])
     } }, thaw_style);
 
   // ---- RENDERERS ------------------------------------------------------------
-  auto dashboard_renderer = Renderer([&]
+
+  // [F1] UNINSTALL BUTTON DEFINITION
+  ButtonOption uninstall_style = ButtonOption::Simple();
+  uninstall_style.transform = [](EntryState state)
+  {
+    auto element = text(" [ SYSTEM PURGE: UNINSTALL GHOSTPORT ] ") | bold;
+    return state.focused
+               ? element | bgcolor(Color::RedLight) | color(Color::Black)
+               : element | bgcolor(Color::Red) | color(Color::White);
+  };
+
+  auto uninstall_btn = Button("Uninstall", [&]
+                              {
+    std::string ps_cmd = "powershell -WindowStyle Normal -Command \""
+        "Start-Sleep -Seconds 2; "
+        "$InstallDir = '$env:LOCALAPPDATA\\GhostPort'; "
+        "$UserPath = [Environment]::GetEnvironmentVariable('PATH', 'User'); "
+        "$PathArray = $UserPath -split ';'; "
+        "$NewPathArray = $PathArray | Where-Object { $_ -ne $InstallDir -and $_ -ne '' }; "
+        "$NewPath = $NewPathArray -join ';'; "
+        "[Environment]::SetEnvironmentVariable('PATH', $NewPath, 'User'); "
+        "Remove-Item -Path $InstallDir -Recurse -Force; "
+        "Write-Host 'GhostPort has been successfully uninstalled. You can close this terminal.'; "
+        "Start-Sleep -Seconds 5;"
+        "\"";
+
+    system(("start \"\" " + ps_cmd).c_str());
+    exit(0); }, uninstall_style);
+
+  auto dashboard_renderer = Renderer(uninstall_btn, [&]
                                      {
     // [B11] FIX: snapshot all needed values under a brief lock, then render without holding it
     std::vector<std::string> logs_snapshot;
@@ -729,6 +759,9 @@ int main(int argc, char *argv[])
         })) | flex,
         window(text(" Security Logs "), vbox(std::move(logs))) | flex,
       }),
+      filler(),
+      separator(),
+      uninstall_btn->Render() | center
     }); });
 
   auto network_renderer = Renderer(Container::Vertical({scan_btn, port_menu, kill_btn}), [&]

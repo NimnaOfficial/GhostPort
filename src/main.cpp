@@ -813,6 +813,7 @@ int main(int argc, char *argv[])
                            { return vbox({
                                         text(" G H O S T P O R T   O S ") | bold | inverted | center,
                                         text(" ADVANCED DEVELOPMENT ENVIRONMENT SECURITY ") | dim | center,
+                                        text("                                                                                                                                                                   @NimnaOfficial ") | center,
                                         separator(),
                                         tab_toggle->Render() | center,
                                         separator(),

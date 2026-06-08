@@ -9,7 +9,7 @@
 [![CMake](https://img.shields.io/badge/CMake-Build-064F8C?style=for-the-badge&logo=cmake)](https://cmake.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=for-the-badge)](https://opensource.org/licenses/MIT)
 
-
+_A multi-threaded, native C++ daemon for Zero-Copy Port Reaping, Kernel-level Thread Suspension, and Docker Container Management._
 
 ![Alt text](https://i.postimg.cc/P5xmX4mn/2im.png)
 ---

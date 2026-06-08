@@ -37,7 +37,7 @@ Built entirely in C++ with a multi-process architecture, GhostPort bypasses stan
 
 ## ⚡ Core Features
 
-- 📊 **Live Kernel Telemetry:** Streams real-time physical RAM utilization and CPU execution cycles directly from the Windows Performance Data Helper (PDH) API.
+
 - 🌐 **Zero-Copy Network Reaper:** Deploys a silent background network Canary over a Localhost IPC socket to detect bound development ports (React, Node, XAMPP, Spring Boot).
 - 🐳 **Docker Poltergeist:** Hijacks the Docker daemon via OS pipelining (`popen`) to gracefully manage, monitor, and spin down detached containers.
 - ❄️ **The Stasis Chamber (Cryo-Sleep):** Halts CPU execution cycles without killing the process. Freezes Docker containers via Linux `cgroups` and native Windows UI apps via the `SuspendThread` Kernel API.

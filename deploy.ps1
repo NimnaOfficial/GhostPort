@@ -1,16 +1,36 @@
 Write-Host "[*] Initiating GhostPort OS Deployment Protocol..." -ForegroundColor Cyan
 
-# 1. Define Paths (Updated for Release Package)
-$SourceExe = "$PSScriptRoot\shadow.exe"
+# 1. Search for binary in standard locations
+$PossiblePaths = @(
+    "$PSScriptRoot\ghostport.exe",
+    "$PSScriptRoot\shadow.exe",
+    "$PSScriptRoot\dist\ghostport.exe",
+    "$PSScriptRoot\build\Release\shadow.exe",
+    "$PSScriptRoot\build\shadow.exe",
+    ".\build\Release\shadow.exe",
+    ".\build\shadow.exe",
+    ".\shadow.exe"
+)
+
+$SourceExe = $null
+foreach ($path in $PossiblePaths) {
+    if (Test-Path $path) {
+        $SourceExe = (Resolve-Path $path).Path
+        break
+    }
+}
+
+if (-Not $SourceExe) {
+    Write-Host "[!] ERROR: Could not find GhostPort executable." -ForegroundColor Red
+    Write-Host "[!] Please ensure project is compiled or binary is in the deployment folder." -ForegroundColor Yellow
+    Exit 1
+}
+
+Write-Host "[+] Found executable at: $SourceExe" -ForegroundColor Green
+
+# 2. Define Installation Target
 $InstallDir = "$env:LOCALAPPDATA\GhostPort"
 $TargetExe = "$InstallDir\ghostport.exe"
-
-# 2. Check if the binary exists
-if (-Not (Test-Path $SourceExe)) {
-    Write-Host "[!] ERROR: Could not find the executable at $SourceExe." -ForegroundColor Red
-    Write-Host "[!] Please ensure shadow.exe is in the same folder as this script." -ForegroundColor Yellow
-    Exit
-}
 
 # 3. Create the Installation Directory
 Write-Host "[*] Creating secure installation directory at $InstallDir..."
@@ -26,16 +46,15 @@ Copy-Item -Path $SourceExe -Destination $TargetExe -Force
 $UserPath = [Environment]::GetEnvironmentVariable("PATH", "User")
 if ($UserPath -notmatch [regex]::Escape($InstallDir)) {
     Write-Host "[*] Modifying Windows Environment Registry..."
-    $NewPath = $UserPath + ";$InstallDir"
+    $NewPath = $UserPath.TrimEnd(';') + ";$InstallDir"
     [Environment]::SetEnvironmentVariable("PATH", $NewPath, "User")
     Write-Host "[+] GhostPort successfully added to System PATH!" -ForegroundColor Green
-}
-else {
+} else {
     Write-Host "[+] GhostPort is already registered in the System PATH." -ForegroundColor Green
 }
 
 Write-Host "=======================================================" -ForegroundColor Cyan
-Write-Host " DEPLOYMENT COMPLETE " -ForegroundColor Green -BackgroundColor Black
+Write-Host " GHOSTPORT OS DEPLOYMENT COMPLETE " -ForegroundColor Green -BackgroundColor Black
 Write-Host "=======================================================" -ForegroundColor Cyan
 Write-Host "Please restart your terminal to apply the registry changes."
 Write-Host "You can now launch the tool from anywhere by typing: ghostport" -ForegroundColor Yellow

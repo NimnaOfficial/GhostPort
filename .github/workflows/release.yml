@@ -1,6 +1,6 @@
 name: GhostPort Release Factory
 
-# 1. When does this run? Every time you push to the 'main' branch!
+# Trigger on every push to main
 on:
   push:
     branches: [ "main" ]
@@ -8,33 +8,48 @@ on:
 jobs:
   build:
     name: Compile for ${{ matrix.os }}
-    # 2. The OS Matrix: We tell GitHub to spin up 3 different virtual machines
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
         os: [windows-latest, ubuntu-latest, macos-latest]
 
     steps:
-    # Step A: Download your code onto the cloud machine
+    # Step A: Checkout source
     - name: 📥 Checkout Source Code
       uses: actions/checkout@v4
 
-    # Step B: Tell CMake to use GitHub's pre-installed vcpkg package manager
+    # Step B: Configure CMake with vcpkg
     - name: ⚙️ Configure CMake & vcpkg
       run: |
-        cmake -B build -S . -DCMAKE_TOOLCHAIN_FILE="$VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" -DCMAKE_BUILD_TYPE=Release
+        cmake -B build -S . \
+          -DCMAKE_TOOLCHAIN_FILE="$VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" \
+          -DCMAKE_BUILD_TYPE=Release
       shell: bash
 
-    # Step C: Compile the C++ code with maximum optimization
+    # Step C: Build
     - name: 🔨 Compile GhostPort Engine
       run: cmake --build build --config Release
 
-    # Step D: Grab the finished executable and save it for users to download
+    # Step D: Rename binary to ghostport / ghostport.exe for consistency
+    - name: 🏷️ Rename binary (Linux/macOS)
+      if: runner.os != 'Windows'
+      run: |
+        mkdir -p dist
+        cp build/shadow dist/ghostport
+        chmod +x dist/ghostport
+      shell: bash
+
+    - name: 🏷️ Rename binary (Windows)
+      if: runner.os == 'Windows'
+      run: |
+        mkdir dist
+        copy build\Release\shadow.exe dist\ghostport.exe
+      shell: cmd
+
+    # Step E: Upload artifacts
     - name: 📦 Upload Compiled Binaries
       uses: actions/upload-artifact@v4
       with:
         name: GhostPort-${{ matrix.os }}
-        path: |
-          build/Release/shadow.exe
-          build/shadow
-        if-no-files-found: ignore
+        path: dist/
+        if-no-files-found: error

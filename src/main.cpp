@@ -42,6 +42,8 @@
 #include <ctime>
 #include <cstdio>
 #include <functional>
+#include <filesystem>
+#include <set>
 
 // ── Platform-Specific Headers ────────────────────────────────────────────────
 #ifdef _WIN32
@@ -66,6 +68,7 @@
   #include <dirent.h>
   #include <sys/types.h>
   #include <climits>
+  #include <pwd.h>
 
 #else  // Linux
   #include <unistd.h>
@@ -73,6 +76,7 @@
   #include <dirent.h>
   #include <sys/types.h>
   #include <climits>
+  #include <pwd.h>
 #endif
 
 #ifdef _WIN32
@@ -126,6 +130,7 @@ int                      selected_os_process_index = 0;
 
 bool             g_is_root = false;
 std::atomic<int> g_anim_tick{0};
+std::atomic<bool> g_is_scanning_procs{false};
 
 bool                  show_confirm = false;
 std::string           confirm_msg  = "";
@@ -208,6 +213,7 @@ void request_elevation(int argc, char* argv[]) {
 #else
     std::vector<const char*> new_argv;
     new_argv.push_back("sudo");
+    new_argv.push_back("-E");
     new_argv.push_back("--");
     new_argv.push_back(self_path.c_str());
     for (int i = 1; i < argc; ++i) {
@@ -216,6 +222,197 @@ void request_elevation(int argc, char* argv[]) {
     new_argv.push_back(nullptr);
     execvp("sudo", const_cast<char* const*>(new_argv.data()));
 #endif
+}
+
+#ifndef _WIN32
+void auto_configure_permanent_sudo(const char* argv0) {
+    if (geteuid() != 0) return;
+    const char* sudo_u = getenv("SUDO_USER");
+    if (!sudo_u || !sudo_u[0] || std::string(sudo_u) == "root") return;
+
+    std::string sudoers_file = "/etc/sudoers.d/ghostport";
+    std::error_code ec;
+    if (std::filesystem::exists(sudoers_file, ec)) return;
+
+    std::string self_path = get_self_executable_path(argv0);
+    std::string user(sudo_u);
+
+    std::ofstream sf(sudoers_file, std::ios::trunc);
+    if (sf.is_open()) {
+        sf << "# GhostPort OS Permanent Root Privilege Rule\n";
+        sf << user << " ALL=(ALL) NOPASSWD: " << self_path
+           << ", /usr/local/bin/ghostport, /usr/local/bin/hostport"
+           << ", /home/" << user << "/.local/bin/ghostport, /home/" << user << "/.local/bin/hostport\n";
+        sf.close();
+        chmod(sudoers_file.c_str(), 0440);
+        log_event_unlocked("[SEC] Permanent root elevation rule automatically installed for " + user);
+    }
+}
+
+void grant_permanent_privilege(const char* argv0) {
+    std::string self_path = get_self_executable_path(argv0);
+    const char* sudo_u = getenv("SUDO_USER");
+    std::string user = (sudo_u && sudo_u[0] && std::string(sudo_u) != "root")
+        ? sudo_u
+        : (getenv("USER") ? getenv("USER") : "");
+    if (user.empty() && getlogin()) user = getlogin();
+
+    if (user.empty() || user == "root") {
+        std::cout << "[!] Could not determine target non-root username.\n";
+        return;
+    }
+
+    std::cout << "\n[*] Configuring persistent passwordless root access for user '" << user << "'...\n";
+    std::string rule = user + " ALL=(ALL) NOPASSWD: " + self_path
+                     + ", /usr/local/bin/ghostport, /usr/local/bin/hostport"
+                     + ", /home/" + user + "/.local/bin/ghostport, /home/" + user + "/.local/bin/hostport";
+
+    if (geteuid() == 0) {
+        std::ofstream sf("/etc/sudoers.d/ghostport", std::ios::trunc);
+        if (sf.is_open()) {
+            sf << "# GhostPort OS Permanent Root Privilege Rule\n" << rule << "\n";
+            sf.close();
+            chmod("/etc/sudoers.d/ghostport", 0440);
+            std::cout << "[+] SUCCESS: Rule installed in /etc/sudoers.d/ghostport\n";
+            std::cout << "[+] You will no longer be prompted for a password when running 'ghostport'!\n\n";
+            return;
+        }
+    }
+
+    std::string rule_cmd = "echo \"" + rule + "\" | sudo tee /etc/sudoers.d/ghostport >/dev/null && sudo chmod 0440 /etc/sudoers.d/ghostport";
+    int res = system(rule_cmd.c_str());
+    if (res == 0) {
+        std::cout << "[+] SUCCESS: Persistent rule installed in /etc/sudoers.d/ghostport\n";
+        std::cout << "[+] You will no longer be prompted for a password when running 'ghostport'!\n\n";
+    } else {
+        std::cout << "[!] FAILED: Could not write sudoers rule. Please grant sudo permissions.\n\n";
+    }
+}
+#endif
+
+void execute_uninstallation(const char* argv0) {
+    std::cout << "\n";
+    std::cout << "  ╔══════════════════════════════════════════════════════════════╗\n";
+    std::cout << "  ║            GHOSTPORT OS — SYSTEM PURGE ENGINE                ║\n";
+    std::cout << "  ╚══════════════════════════════════════════════════════════════╝\n\n";
+    std::cout << "  [*] Initiating complete system purge...\n";
+
+#ifdef _WIN32
+    std::string local_app = "";
+    char* app_data = nullptr;
+    size_t len = 0;
+    if (_dupenv_s(&app_data, &len, "LOCALAPPDATA") == 0 && app_data) {
+        local_app = std::string(app_data) + "\\GhostPort";
+        free(app_data);
+    }
+
+    system("powershell -NoProfile -Command \""
+           "$D = $env:LOCALAPPDATA + '\\GhostPort'; "
+           "$P = [Environment]::GetEnvironmentVariable('PATH', 'User'); "
+           "if ($P) { "
+           "  $A = $P -split ';' | Where-Object { $_ -ne $D -and $_ -ne '' }; "
+           "  [Environment]::SetEnvironmentVariable('PATH', ($A -join ';'), 'User'); "
+           "}\" >nul 2>nul");
+    std::cout << "  [+] Removed GhostPort from User PATH registry.\n";
+
+    if (!local_app.empty()) {
+        std::error_code ec;
+        std::filesystem::remove_all(local_app, ec);
+        std::cout << "  [+] Purged directory: " << local_app << "\n";
+    }
+
+    std::string self = get_self_executable_path(argv0);
+    std::string del_cmd = "cmd.exe /C ping 127.0.0.1 -n 2 > nul & del /F /Q \"" + self + "\"";
+    STARTUPINFOA si = { sizeof(si) };
+    PROCESS_INFORMATION pi;
+    CreateProcessA(NULL, const_cast<char*>(del_cmd.c_str()), NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi);
+    if (pi.hProcess) CloseHandle(pi.hProcess);
+    if (pi.hThread) CloseHandle(pi.hThread);
+
+#else
+    std::vector<std::string> home_dirs;
+    const char* sudo_u = getenv("SUDO_USER");
+    if (sudo_u && sudo_u[0] && std::string(sudo_u) != "root") {
+        struct passwd* pw = getpwnam(sudo_u);
+        if (pw && pw->pw_dir) home_dirs.push_back(pw->pw_dir);
+    }
+    const char* env_home = getenv("HOME");
+    if (env_home && env_home[0]) home_dirs.push_back(env_home);
+
+    std::vector<std::string> targets = {
+        "/usr/local/bin/ghostport",
+        "/usr/local/bin/hostport",
+        "/etc/sudoers.d/ghostport"
+    };
+
+    for (const auto& h : home_dirs) {
+        targets.push_back(h + "/.local/bin/ghostport");
+        targets.push_back(h + "/.local/bin/hostport");
+    }
+
+    std::string self_path = get_self_executable_path(argv0);
+    if (!self_path.empty()) targets.push_back(self_path);
+
+    for (const auto& target : targets) {
+        std::error_code ec;
+        if (std::filesystem::exists(target, ec)) {
+            if (std::filesystem::remove(target, ec)) {
+                std::cout << "  [+] Purged: " << target << "\n";
+            } else if (geteuid() != 0) {
+                std::string cmd = "sudo -n rm -f \"" + target + "\" 2>/dev/null";
+                if (system(cmd.c_str()) == 0) {
+                    std::cout << "  [+] Purged (via sudo): " << target << "\n";
+                } else {
+                    std::cout << "  [!] Note: " << target << " requires root permissions to remove.\n";
+                }
+            }
+        }
+    }
+
+    // Clean shell rc profiles
+    for (const auto& h : home_dirs) {
+        std::vector<std::string> rcs = {h + "/.bashrc", h + "/.zshrc", h + "/.config/fish/config.fish"};
+        for (const auto& rc : rcs) {
+            std::ifstream in(rc);
+            if (!in.is_open()) continue;
+            std::string line;
+            std::vector<std::string> kept;
+            bool modified = false;
+            while (std::getline(in, line)) {
+                if (line.find("GhostPort") != std::string::npos ||
+                    (line.find(".local/bin") != std::string::npos && line.find("ghostport") != std::string::npos) ||
+                    (line.find(".local/bin") != std::string::npos && line.find("hostport") != std::string::npos) ||
+                    (line.find("fish_add_path") != std::string::npos && line.find(".local/bin") != std::string::npos)) {
+                    modified = true;
+                    continue;
+                }
+                kept.push_back(line);
+            }
+            in.close();
+            if (modified) {
+                std::ofstream out(rc, std::ios::trunc);
+                for (const auto& l : kept) out << l << "\n";
+                std::cout << "  [+] Cleaned PATH entries from: " << rc << "\n";
+            }
+        }
+    }
+#endif
+
+    std::cout << "\n  [✓] GHOSTPORT OS HAS BEEN FULLY UNINSTALLED FROM THIS SYSTEM.\n\n";
+}
+
+void print_help_banner() {
+    std::cout << "\n"
+              << "GhostPort OS — High-Performance Cross-Platform Security TUI (v3.5)\n"
+              << "Usage: ghostport [OPTION]\n\n"
+              << "Options:\n"
+              << "  (no args)           Launch interactive Fullscreen TUI\n"
+              << "  --grant-permanent   Configure passwordless root execution in /etc/sudoers.d\n"
+              << "  --uninstall         Purge GhostPort binaries, configurations, and PATH entries\n"
+              << "  --purge             Alias for --uninstall\n"
+              << "  --run-canary        Run background port canary probe mission\n"
+              << "  -h, --help          Display this help and exit\n"
+              << "  -v, --version       Display version information\n\n";
 }
 
 // ============================================================================
@@ -393,34 +590,47 @@ void kill_target(uint16_t port, uint32_t pid) {
 void threat_analysis_engine(ScreenInteractive* screen) {
     srand(static_cast<unsigned>(std::time(nullptr)));
     while (true) {
-        std::this_thread::sleep_for(std::chrono::seconds(6));
-        bool threat_detected = false;
+        std::this_thread::sleep_for(std::chrono::seconds(5));
+        std::vector<PortData> ports_copy;
         {
             std::lock_guard<std::mutex> lock(state_mutex);
-            for (size_t i = 0; i < live_ports.size(); ++i) {
-                uint32_t pid = live_ports[i].process_id;
-                long long ram_mb = get_process_ram_mb(pid);
+            ports_copy = live_ports;
+        }
+        if (ports_copy.empty()) continue;
 
-                // Real threshold inspection: > 450MB on local port or heuristic fallback
-                bool is_leak = (ram_mb > 450);
-                if (!is_leak && pid == 0 && (rand() % 100 > 75)) {
-                    is_leak = true;
-                }
-
-                if (is_leak && !live_ports[i].is_memory_leak) {
-                    live_ports[i].is_memory_leak = true;
-                    if (i < port_menu_entries.size()) {
-                        std::string ram_label = (ram_mb > 0) ? (" [" + std::to_string(ram_mb) + " MB]") : "";
-                        port_menu_entries[i] = "[CRITICAL LEAK] Port " +
-                                               std::to_string(live_ports[i].port_number) + ram_label;
-                    }
-                    log_event_unlocked("[WARN] Excessive Memory on Port " +
-                                       std::to_string(live_ports[i].port_number) + "!");
-                    threat_detected = true;
-                }
+        // Inspect memory outside mutex lock to prevent UI freezing
+        std::vector<std::pair<size_t, long long>> detected_leaks;
+        for (size_t i = 0; i < ports_copy.size(); ++i) {
+            if (ports_copy[i].is_memory_leak) continue;
+            uint32_t pid = ports_copy[i].process_id;
+            long long ram_mb = get_process_ram_mb(pid);
+            bool is_leak = (ram_mb > 450);
+            if (!is_leak && pid == 0 && (rand() % 100 > 85)) {
+                is_leak = true;
+            }
+            if (is_leak) {
+                detected_leaks.push_back({i, ram_mb});
             }
         }
-        if (threat_detected && screen) screen->PostEvent(Event::Custom);
+
+        if (!detected_leaks.empty()) {
+            std::lock_guard<std::mutex> lock(state_mutex);
+            for (const auto& item : detected_leaks) {
+                size_t idx = item.first;
+                long long ram_mb = item.second;
+                if (idx < live_ports.size()) {
+                    live_ports[idx].is_memory_leak = true;
+                    if (idx < port_menu_entries.size()) {
+                        std::string ram_label = (ram_mb > 0) ? (" [" + std::to_string(ram_mb) + " MB]") : "";
+                        port_menu_entries[idx] = "[CRITICAL LEAK] Port " +
+                                               std::to_string(live_ports[idx].port_number) + ram_label;
+                    }
+                    log_event_unlocked("[WARN] Excessive Memory on Port " +
+                                       std::to_string(live_ports[idx].port_number) + "!");
+                }
+            }
+            if (screen) screen->PostEvent(Event::Custom);
+        }
     }
 }
 
@@ -539,11 +749,16 @@ void start_telemetry_stream(ScreenInteractive* screen) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1000));
         g_anim_tick.fetch_add(1);
 
-        // Periodically refresh OS process table in background
+        // Periodically refresh OS process table in background without thread accumulation
         if (g_anim_tick.load() % 4 == 0) {
-            std::thread([]() {
-                scan_os_processes();
-            }).detach();
+            bool expected = false;
+            if (g_is_scanning_procs.compare_exchange_strong(expected, true)) {
+                std::thread([screen]() {
+                    scan_os_processes();
+                    g_is_scanning_procs.store(false);
+                    if (screen) screen->PostEvent(Event::Custom);
+                }).detach();
+            }
         }
 
         int cpu=0, ram=0;
@@ -625,33 +840,42 @@ void start_telemetry_stream(ScreenInteractive* screen) {
 void scan_docker_environment(std::vector<DockerContainer>& tl,
                              std::vector<std::string>&     tm, int& idx)
 {
-    std::lock_guard<std::mutex> lk(state_mutex);
-    tl.clear(); tm.clear(); idx=0;
+    std::vector<DockerContainer> local_tl;
+    std::vector<std::string> local_tm;
+
 #ifdef _WIN32
-    FILE* p=_popen("docker ps --format \"{{.ID}}|{{.Names}}|{{.Status}}\"","r");
+    FILE* p = _popen("docker ps --format \"{{.ID}}|{{.Names}}|{{.Status}}\"", "r");
 #else
-    FILE* p=popen("docker ps --format \"{{.ID}}|{{.Names}}|{{.Status}}\"","r");
+    FILE* p = popen("docker ps --format \"{{.ID}}|{{.Names}}|{{.Status}}\"", "r");
 #endif
-    if (!p) return;
-    char buf[256];
-    while (fgets(buf,sizeof(buf),p)) {
-        std::string ln(buf);
-        if (!ln.empty()&&ln.back()=='\n') ln.pop_back();
-        auto p1=ln.find('|'), p2=ln.find('|',p1+1);
-        if (p1!=std::string::npos&&p2!=std::string::npos) {
-            DockerContainer c={ln.substr(0,p1),
-                               ln.substr(p1+1,p2-p1-1),
-                               ln.substr(p2+1)};
-            tl.push_back(c);
-            std::string pfx=(c.status.find("Paused")!=std::string::npos)?"[FROZEN] ":"[ACTIVE] ";
-            tm.push_back(pfx+c.name+"   ["+c.status+"]");
+    if (p) {
+        char buf[256];
+        while (fgets(buf, sizeof(buf), p)) {
+            std::string ln(buf);
+            if (!ln.empty() && ln.back() == '\n') ln.pop_back();
+            auto p1 = ln.find('|'), p2 = ln.find('|', p1 + 1);
+            if (p1 != std::string::npos && p2 != std::string::npos) {
+                DockerContainer c = {ln.substr(0, p1),
+                                     ln.substr(p1 + 1, p2 - p1 - 1),
+                                     ln.substr(p2 + 1)};
+                local_tl.push_back(c);
+                std::string pfx = (c.status.find("Paused") != std::string::npos) ? "[FROZEN] " : "[ACTIVE] ";
+                local_tm.push_back(pfx + c.name + "   [" + c.status + "]");
+            }
         }
-    }
 #ifdef _WIN32
-    _pclose(p);
+        _pclose(p);
 #else
-    pclose(p);
+        pclose(p);
 #endif
+    }
+
+    std::lock_guard<std::mutex> lk(state_mutex);
+    tl = std::move(local_tl);
+    tm = std::move(local_tm);
+    if (idx >= (int)tm.size()) {
+        idx = tm.empty() ? 0 : (int)tm.size() - 1;
+    }
 }
 
 void scan_os_processes() {
@@ -736,69 +960,175 @@ commit:
     std::lock_guard<std::mutex> lk(state_mutex);
     os_process_list=std::move(procs);
     os_process_menu=std::move(menu);
-    selected_os_process_index=0;
+    if (selected_os_process_index >= (int)os_process_menu.size()) {
+        selected_os_process_index = os_process_menu.empty() ? 0 : (int)os_process_menu.size() - 1;
+    }
 }
 
 // ============================================================================
-// [8] CANARY PROBE & IPC WATCHDOG
+// [8] SYSTEM LISTENING SOCKET DISCOVERY & CANARY ENGINE
 // ============================================================================
-void execute_canary_mission() {
-    asio::io_context io; asio::error_code ec;
-    asio::ip::tcp::socket sock(io);
-    asio::ip::tcp::endpoint ep(asio::ip::address::from_string("127.0.0.1"),GHOSTPORT_IPC_PORT);
-    for (int i=0;i<15;++i){sock.connect(ep,ec);if(!ec)break;std::this_thread::sleep_for(std::chrono::milliseconds(100));}
-    if (ec) return;
-
-    std::vector<uint16_t> tgts={80,443,3000,3001,3306,3307,4200,5000,5173,5432,6379,8000,8080,8081,8443,8888,9000,9200,27017};
-    asio::ip::tcp::resolver res(io);
-    for (uint16_t port:tgts) {
-        if (port==GHOSTPORT_IPC_PORT) continue;
-        asio::ip::tcp::socket ts(io); asio::error_code e;
-        auto eps=res.resolve("localhost",std::to_string(port),e);
-        if (!e){
-            asio::connect(ts,eps,e);
-            if (!e){
-                PortData d={port,0,false};
-                asio::write(sock,asio::buffer(&d,sizeof(d)));
-                ts.close();
+std::vector<uint16_t> discover_system_listening_ports() {
+    std::set<uint16_t> ports;
+#ifdef _WIN32
+    FILE* p = _popen("netstat -ano -p tcp | findstr LISTENING", "r");
+    if (p) {
+        char buf[256];
+        while (fgets(buf, sizeof(buf), p)) {
+            std::string ln(buf);
+            std::istringstream iss(ln);
+            std::string proto, local, rem, state, pid;
+            iss >> proto >> local >> rem >> state >> pid;
+            auto colon = local.find_last_of(':');
+            if (colon != std::string::npos) {
+                try {
+                    uint16_t port = std::stoul(local.substr(colon + 1));
+                    if (port > 0 && port != GHOSTPORT_IPC_PORT) ports.insert(port);
+                } catch (...) {}
             }
         }
+        _pclose(p);
+    }
+#elif defined(__APPLE__)
+    FILE* p = popen("lsof -nP -iTCP -sTCP:LISTEN 2>/dev/null", "r");
+    if (p) {
+        char buf[256];
+        while (fgets(buf, sizeof(buf), p)) {
+            std::string ln(buf);
+            auto colon = ln.find_last_of(':');
+            if (colon != std::string::npos) {
+                std::istringstream iss(ln.substr(colon + 1));
+                uint16_t port = 0;
+                if (iss >> port && port > 0 && port != GHOSTPORT_IPC_PORT) ports.insert(port);
+            }
+        }
+        pclose(p);
+    }
+#else
+    // Linux: parse kernel /proc/net/tcp & tcp6 directly (< 1ms, zero fork)
+    for (const char* fpath : {"/proc/net/tcp", "/proc/net/tcp6"}) {
+        std::ifstream file(fpath);
+        if (!file.is_open()) continue;
+        std::string line;
+        std::getline(file, line); // header
+        while (std::getline(file, line)) {
+            std::istringstream iss(line);
+            std::string sl, local, rem, state;
+            if (iss >> sl >> local >> rem >> state) {
+                if (state == "0A") { // TCP_LISTEN
+                    auto colon = local.find(':');
+                    if (colon != std::string::npos) {
+                        try {
+                            uint16_t port = (uint16_t)std::stoul(local.substr(colon + 1), nullptr, 16);
+                            if (port > 0 && port != GHOSTPORT_IPC_PORT) ports.insert(port);
+                        } catch (...) {}
+                    }
+                }
+            }
+        }
+    }
+#endif
+    return std::vector<uint16_t>(ports.begin(), ports.end());
+}
+
+void execute_canary_mission() {
+    asio::io_context io;
+    asio::error_code ec;
+    asio::ip::tcp::socket sock(io);
+    asio::ip::tcp::endpoint ep(asio::ip::address::from_string("127.0.0.1"), GHOSTPORT_IPC_PORT);
+    for (int i = 0; i < 20; ++i) {
+        sock.connect(ep, ec);
+        if (!ec) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    if (ec) return;
+
+    // 1. Immediately report all active system listening ports
+    auto sys_ports = discover_system_listening_ports();
+    for (uint16_t port : sys_ports) {
+        if (port == GHOSTPORT_IPC_PORT) continue;
+        PortData d = {port, 0, false};
+        asio::error_code we;
+        asio::write(sock, asio::buffer(&d, sizeof(d)), we);
+    }
+
+    // 2. Fast non-blocking probe of common development server ports
+    std::vector<uint16_t> common_tgts = {
+        80, 443, 3000, 3001, 3306, 3307, 4200, 5000, 5173,
+        5432, 6379, 8000, 8080, 8081, 8443, 8888, 9000, 9200, 27017
+    };
+    for (uint16_t port : common_tgts) {
+        if (port == GHOSTPORT_IPC_PORT) continue;
+        if (std::find(sys_ports.begin(), sys_ports.end(), port) != sys_ports.end()) continue;
+
+        asio::ip::tcp::socket ts(io);
+        asio::error_code e;
+        ts.open(asio::ip::tcp::v4(), e);
+        if (e) continue;
+        ts.non_blocking(true, e);
+        ts.connect(asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), port), e);
+        if (!e || e == asio::error::would_block || e == asio::error::in_progress) {
+            fd_set fdwrite;
+            FD_ZERO(&fdwrite);
+            FD_SET(ts.native_handle(), &fdwrite);
+            struct timeval tv = {0, 25000}; // 25ms timeout
+            int sel = select((int)ts.native_handle() + 1, NULL, &fdwrite, NULL, &tv);
+            if (sel > 0) {
+                int so_err = 0;
+                socklen_t len = sizeof(so_err);
+                getsockopt(ts.native_handle(), SOL_SOCKET, SO_ERROR, (char*)&so_err, &len);
+                if (so_err == 0) {
+                    PortData d = {port, 0, false};
+                    asio::error_code we;
+                    asio::write(sock, asio::buffer(&d, sizeof(d)), we);
+                }
+            }
+        }
+        ts.close(e);
     }
 }
 
 void watchdog_listen_server(ScreenInteractive* screen) {
     try {
         asio::io_context io;
-        asio::ip::tcp::endpoint ep(asio::ip::address::from_string("127.0.0.1"),GHOSTPORT_IPC_PORT);
+        asio::ip::tcp::endpoint ep(asio::ip::address::from_string("127.0.0.1"), GHOSTPORT_IPC_PORT);
         asio::ip::tcp::acceptor acc(io);
         acc.open(ep.protocol());
         acc.set_option(asio::ip::tcp::acceptor::reuse_address(true));
-        acc.bind(ep); acc.listen();
-        asio::ip::tcp::socket sock(io); acc.accept(sock);
-        while (is_scanning) {
-            PortData in; asio::error_code ec;
-            size_t len=sock.read_some(asio::buffer(&in,sizeof(in)),ec);
-            if (ec==asio::error::eof||ec) break;
-            if (len==sizeof(in)) {
-                // Asynchronously resolve PID and process info
+        acc.bind(ep);
+        acc.listen();
+        asio::ip::tcp::socket sock(io);
+        acc.accept(sock);
+        while (is_scanning.load()) {
+            PortData in;
+            asio::error_code ec;
+            size_t len = sock.read_some(asio::buffer(&in, sizeof(in)), ec);
+            if (ec == asio::error::eof || ec) break;
+            if (len == sizeof(in)) {
                 auto proc_info = resolve_port_process(in.port_number);
                 in.process_id = proc_info.first;
 
                 std::lock_guard<std::mutex> lk(state_mutex);
-                std::string svc=get_service_name(in.port_number);
-                std::string pid_str = (in.process_id > 0)
-                    ? ("  (PID: " + std::to_string(in.process_id) + (!proc_info.second.empty() ? (" - " + proc_info.second) : "") + ")")
-                    : "";
+                bool exists = false;
+                for (const auto& lp : live_ports) {
+                    if (lp.port_number == in.port_number) { exists = true; break; }
+                }
+                if (!exists) {
+                    std::string svc = get_service_name(in.port_number);
+                    std::string pid_str = (in.process_id > 0)
+                        ? ("  (PID: " + std::to_string(in.process_id) + (!proc_info.second.empty() ? (" - " + proc_info.second) : "") + ")")
+                        : "";
 
-                live_ports.push_back(in);
-                port_menu_entries.push_back(
-                    "Port " + std::to_string(in.port_number) +
-                    "  [" + svc + "]" + pid_str + "  — DETECTED");
-                screen->PostEvent(Event::Custom);
+                    live_ports.push_back(in);
+                    port_menu_entries.push_back(
+                        "Port " + std::to_string(in.port_number) +
+                        "  [" + svc + "]" + pid_str + "  — DETECTED");
+                    if (screen) screen->PostEvent(Event::Custom);
+                }
             }
         }
     } catch (...) {}
-    is_scanning=false;
+    is_scanning.store(false);
     log_event("[NET] Canary mission complete.", screen);
 }
 
@@ -806,30 +1136,34 @@ void watchdog_listen_server(ScreenInteractive* screen) {
 // [9] MASTER APPLICATION INTERFACE
 // ============================================================================
 int main(int argc, char* argv[]) {
-    if (argc>1 && std::string(argv[1])=="--run-canary") {
-        execute_canary_mission();
-        return 0;
-    }
-
+    // Process CLI flags
+    if (argc > 1) {
+        std::string arg = argv[1];
+        if (arg == "--uninstall" || arg == "--purge") {
+            execute_uninstallation(argv[0]);
+            return 0;
+        }
+        if (arg == "--grant-permanent") {
 #ifndef _WIN32
-    if (argc > 1 && std::string(argv[1]) == "--grant-permanent") {
-        std::string self_path = get_self_executable_path(argv[0]);
-        std::string user = getenv("USER") ? getenv("USER") : "";
-        if (user.empty() && getlogin()) user = getlogin();
-        if (!user.empty()) {
-            std::cout << "\n[*] Configuring persistent passwordless execution for " << user << "...\n";
-            std::string rule_cmd = "echo \"" + user + " ALL=(ALL) NOPASSWD: " + self_path + "\" | sudo tee /etc/sudoers.d/ghostport >/dev/null && sudo chmod 0440 /etc/sudoers.d/ghostport";
-            int res = system(rule_cmd.c_str());
-            if (res == 0) {
-                std::cout << "[+] SUCCESS: Persistent rule installed in /etc/sudoers.d/ghostport\n";
-                std::cout << "[+] You will no longer be prompted for a password when running 'ghostport'!\n\n";
-            } else {
-                std::cout << "[!] FAILED: Could not write sudoers rule. Please grant sudo permissions.\n\n";
-            }
+            grant_permanent_privilege(argv[0]);
+#else
+            std::cout << "[*] Windows utilizes UAC Token Elevation automatically.\n";
+#endif
+            return 0;
+        }
+        if (arg == "--run-canary") {
+            execute_canary_mission();
+            return 0;
+        }
+        if (arg == "--help" || arg == "-h") {
+            print_help_banner();
+            return 0;
+        }
+        if (arg == "--version" || arg == "-v") {
+            std::cout << "GhostPort OS v3.5 (Enterprise Sentinel)\n";
             return 0;
         }
     }
-#endif
 
     // Privilege check & auto-escalation
     if (!check_privilege()) {
@@ -855,11 +1189,17 @@ int main(int argc, char* argv[]) {
 
         std::cout
             << "  [!] Elevation was not granted.\n"
-            << "  [!] Launching in Limited Privilege Mode.\n"
+            << "  [!] Launching in Limited Privilege Mode in 2 seconds...\n"
             << std::endl;
+        std::this_thread::sleep_for(std::chrono::seconds(2));
     }
 
     g_is_root = check_privilege();
+#ifndef _WIN32
+    if (g_is_root) {
+        auto_configure_permanent_sudo(argv[0]);
+    }
+#endif
 
     // Default to OS Native Processes
     stasis_mode = 1;
@@ -868,11 +1208,21 @@ int main(int argc, char* argv[]) {
     std::thread(start_telemetry_stream, &screen).detach();
     std::thread(threat_analysis_engine, &screen).detach();
 
-    // Initial background scan to populate processes and containers immediately
+    // Initial background scan to populate processes, containers, and ports immediately
     std::thread([&screen]() {
         scan_os_processes();
         scan_docker_environment(stasis_docker_list, stasis_docker_menu, selected_stasis_docker_index);
-        scan_docker_environment(docker_list, docker_menu_entries, selected_docker_index);
+        {
+            std::lock_guard<std::mutex> lk(state_mutex);
+            docker_list = stasis_docker_list;
+            docker_menu_entries = stasis_docker_menu;
+        }
+        // Initial port scan
+        if (!is_scanning.exchange(true)) {
+            std::thread(watchdog_listen_server, &screen).detach();
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            execute_canary_mission();
+        }
         screen.PostEvent(Event::Custom);
     }).detach();
 
@@ -946,15 +1296,10 @@ int main(int argc, char* argv[]) {
         }
         log_event("[NET] Security Canary deployed across target ports...", &screen);
         std::thread(watchdog_listen_server, &screen).detach();
-        if (argc>0) {
-#ifdef _WIN32
-            std::string sp="\""+std::string(argv[0])+"\"";
-            system(("start /B \"\" "+sp+" --run-canary >nul 2>nul").c_str());
-#else
-            std::string sp=std::string(argv[0]);
-            system(("\""+sp+"\" --run-canary &").c_str());
-#endif
-        }
+        std::thread([]() {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            execute_canary_mission();
+        }).detach();
     }, ButtonOption::Animated(Color::Red, Color::White));
 
     auto port_menu = Radiobox(&port_menu_entries, &selected_port_index);
@@ -1214,20 +1559,9 @@ int main(int argc, char* argv[]) {
 
     auto uninstall_btn = Button("Uninstall", [&] {
         confirm_msg = "Permanently purge GhostPort OS from this system?";
-        confirm_fn  = []() {
-#ifdef _WIN32
-            std::string ps = "powershell -WindowStyle Normal -Command \""
-                "Start-Sleep -Seconds 2; "
-                "$D=$env:LOCALAPPDATA+'\\GhostPort'; "
-                "$P=[Environment]::GetEnvironmentVariable('PATH','User'); "
-                "$A=$P -split ';'|Where-Object{$_ -ne $D -and $_ -ne ''}; "
-                "[Environment]::SetEnvironmentVariable('PATH',$A -join ';','User'); "
-                "if(Test-Path $D){Remove-Item -Path $D -Recurse -Force;} "
-                "Write-Host 'GhostPort has been successfully uninstalled.'; Start-Sleep 5;\"";
-            system(("start \"\" " + ps).c_str());
-#else
-            system("sh -c 'sleep 2; rm -f /usr/local/bin/ghostport \"$HOME/.local/bin/ghostport\"; echo \"[GhostPort] Uninstalled successfully.\"' &");
-#endif
+        confirm_fn  = [&screen, argv]() {
+            screen.ExitLoopClosure()();
+            execute_uninstallation(argv[0]);
             exit(0);
         };
         show_confirm = true;

@@ -142,6 +142,26 @@ cmake --build build --config Release
 ghostport
 ```
 
+### ⚡ Permanent Passwordless Setup (Linux & macOS):
+To grant GhostPort permanent root access so you never have to type your password again:
+```bash
+ghostport --grant-permanent
+```
+
+### 🗑️ Complete System Uninstallation:
+To cleanly purge GhostPort binaries, aliases, sudo rules, and PATH entries at any time:
+```bash
+# Via CLI command:
+ghostport --uninstall
+
+# Or via deployment script:
+./deploy.sh --uninstall      # Linux & macOS
+.\deploy.ps1 -Uninstall      # Windows
+
+# Or interactively:
+# Click the red "SYSTEM PURGE — UNINSTALL GHOSTPORT" button in the TUI Dashboard.
+```
+
 ---
 
 ## 🛡️ Privilege Auto-Elevation
